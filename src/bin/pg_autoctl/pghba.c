@@ -15,6 +15,7 @@
 #include "postgres_fe.h"
 #include "pqexpbuffer.h"
 
+#include "debian.h"
 #include "defaults.h"
 #include "file_utils.h"
 #include "ipaddr.h"
@@ -42,7 +43,7 @@ static int escape_hba_string(char *destination, const char *hbaString);
  */
 bool
 pghba_ensure_host_rule_exists(const char *hbaFilePath,
-							  bool ssl,
+							  HBAConnectionType connectionType,
 							  HBADatabaseType databaseType,
 							  const char *database,
 							  const char *username,
@@ -61,13 +62,34 @@ pghba_ensure_host_rule_exists(const char *hbaFilePath,
 		return false;
 	}
 
-	if (ssl)
+	if (connectionType == HBA_CONNECTION_LOCAL)
+	{
+		appendPQExpBufferStr(hbaLineBuffer, "local ");
+	}
+	else if (connectionType == HBA_CONNECTION_HOST)
+	{
+		appendPQExpBufferStr(hbaLineBuffer, "host ");
+	}
+	else if (connectionType == HBA_CONNECTION_HOSTSSL)
 	{
 		appendPQExpBufferStr(hbaLineBuffer, "hostssl ");
 	}
+	else if (connectionType == HBA_CONNECTION_HOSTNOSSL)
+	{
+		appendPQExpBufferStr(hbaLineBuffer, "hostnossl ");
+	}
+	else if (connectionType == HBA_CONNECTION_HOSTGSSENC)
+	{
+		appendPQExpBufferStr(hbaLineBuffer, "hostgssenc ");
+	}
+	else if (connectionType == HBA_CONNECTION_HOSTNOGSSENC)
+	{
+		appendPQExpBufferStr(hbaLineBuffer, "hostnogssenc ");
+	}
 	else
 	{
-		appendPQExpBufferStr(hbaLineBuffer, "host ");
+		log_error("unknown HBA connection type: %d", connectionType);
+		return false;
 	}
 
 	append_database_field(hbaLineBuffer, databaseType, database);
@@ -167,6 +189,69 @@ pghba_ensure_host_rule_exists(const char *hbaFilePath,
 	destroyPQExpBuffer(newHbaContents);
 
 	log_debug("Wrote new %s", hbaFilePath);
+
+	return true;
+}
+
+
+/*
+ * comment_out_configuration_parameters gets the hbaFilePath and overrides it with
+ * 		"local all all trust"
+ * 	which means allow all connections via unix domain sockets. The function also
+ * 	keeps the comments and comments out the the already existing rules by
+ * 	explicitly mentioning that pg_auto_failover edited ("edited by pg_auto_failover").
+ */
+bool
+override_pg_hba_with_only_domain_socket_access(const char *hbaFilePath)
+{
+	char	 pgHbaDefaultFile[MAXPGPATH];
+
+	/* means "all" users */
+	const char *userName = NULL;
+	const char *authenticationScheme = "trust";
+
+	/* means "all" databases */
+	const char *databaseName = NULL;
+
+	/* means "all" hosts */
+	const char *host = "";
+
+	/* comment out lines starting with these values */
+	const char *targetVariableExpression =
+		"(local|host|hostssl|hostnossl|hostgssenc|hostnogssenc)";
+
+	/* keep a copy of the original pg_hba.conf in pg_hba.conf.default */
+	sprintf(pgHbaDefaultFile, "%s%s", hbaFilePath, ".default");
+
+	/* edit postgresql.conf and move it to its dst pathname */
+	log_info("Preparing \"%s\" from \"%s\"", pgHbaDefaultFile, hbaFilePath);
+
+	if (!duplicate_file((char *) hbaFilePath, pgHbaDefaultFile))
+	{
+		/* errors are already reported */
+		return  false;
+	}
+
+	log_info("Commenting out rules in \"%s\"", hbaFilePath);
+
+	/* comment out all lines that define a rule in pg_hba.conf */
+	if (!comment_out_configuration_parameters(pgHbaDefaultFile, hbaFilePath,
+											 targetVariableExpression))
+	{
+		/* errors are already reported */
+		return false;
+	}
+
+	log_info("Adding rule to \"%s\" to allow unix domain socket accesses", hbaFilePath);
+
+	/* add the line that enables  */
+	if (!pghba_ensure_host_rule_exists(hbaFilePath,  HBA_CONNECTION_LOCAL,
+									  HBA_DATABASE_ALL, databaseName,  userName,
+									  host, authenticationScheme))
+	{
+		/* errors are already reported */
+		return false;
+	}
 
 	return true;
 }
@@ -308,6 +393,10 @@ pghba_enable_lan_cidr(PGSQL *pgsql,
 	char ipAddr[BUFSIZE];
 	char cidr[BUFSIZE];
 
+	HBAConnectionType connectionType =
+		ssl ? HBA_CONNECTION_HOSTSSL : HBA_CONNECTION_HOST;
+
+
 	/* Compute the CIDR notation for our hostname */
 	if (!findHostnameLocalAddress(hostname, ipAddr, BUFSIZE))
 	{
@@ -357,8 +446,8 @@ pghba_enable_lan_cidr(PGSQL *pgsql,
 	 * We still go on when skipping HBA, so that we display a useful message to
 	 * the user with the specific rule we are skipping here.
 	 */
-	if (!pghba_ensure_host_rule_exists(hbaFilePath, ssl, databaseType, database,
-									   username, cidr, authenticationScheme))
+	if (!pghba_ensure_host_rule_exists(hbaFilePath, connectionType, databaseType,
+									  database, username, cidr, authenticationScheme))
 	{
 		log_error("Failed to add the local network to PostgreSQL HBA file: "
 				  "couldn't modify the pg_hba file");

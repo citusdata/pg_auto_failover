@@ -29,7 +29,12 @@
 #include "signals.h"
 #include "string_utils.h"
 
+char unixDomainSocketTemplate[] = "/tmp/regress.111111";
 
+/* todo: make it NULL for actual values */
+char *currentUnixDomainSocket = unixDomainSocketTemplate;
+
+static bool set_temp_sockdir(void);
 static bool get_pgpid(PostgresSetup *pgSetup, bool pgIsNotRunningIsOk);
 static PostmasterStatus pmStatusFromString(const char *postmasterStatus);
 
@@ -52,6 +57,34 @@ pg_setup_init(PostgresSetup *pgSetup,
 {
 	bool pgIsReady = false;
 	int errors = 0;
+
+	/*
+	 * If pg_auto_failover restarted, we read PGHOST from the config files.
+	 * And, if the config file contains the temporary folder name
+	 * (e.g., unixDomainSocketTemplate), we should use it.
+	 * */
+	if (strstr(options->pghost, "/regress.") != NULL)
+	{
+		setenv("PGHOST", options->pghost, true);
+		setenv("PG_REGRESS_SOCK_DIR", options->pghost, true);
+	}
+	else if (env_found_empty("PG_REGRESS_SOCK_DIR"))
+	{
+		/*
+		 * If we're inside regression test, we should set the unix domain socket
+		 * to a temporary socket.
+		 */
+		if (!set_temp_sockdir())
+		{
+			log_error("Failed to set temporary socket directory");
+
+			return false;
+		}
+
+		log_trace("Setting unix domain socket to to pghost: %s",
+				  currentUnixDomainSocket);
+		log_trace("options->pghost is set to: %s", options->pghost);
+	}
 
 	/*
 	 * Make sure that we keep the options->nodeKind in the pgSetup.
@@ -394,6 +427,38 @@ pg_setup_init(PostgresSetup *pgSetup,
 	return true;
 }
 
+
+
+/*
+ * TODO: add  comments.
+ */
+static bool
+set_temp_sockdir(void)
+{
+	/* create the tempDir once */
+	if (currentUnixDomainSocket == NULL)
+	{
+		/* TODO: cleanup the temp folder as Postgres does */
+		currentUnixDomainSocket = mkdtemp(unixDomainSocketTemplate);
+		if (currentUnixDomainSocket == NULL)
+		{
+			/* TODO: is there anything we can do? */
+			log_error("mkdtemp failed: ");
+			return false;
+		}
+	}
+
+	/*
+	 * Forcefully set PGHOST and PG_REGRESS_SOCK_DIR as some other code-paths
+	 * rely on these enviroment variables.
+	 *
+	 * TODO: Do we really need to forcefully set both?
+	 */
+	setenv("PGHOST", currentUnixDomainSocket, true);
+	setenv("PG_REGRESS_SOCK_DIR", currentUnixDomainSocket, true);
+
+	return true;
+}
 
 /*
  * Read the first line of the PGDATA/postmaster.pid file to get Postgres PID.
@@ -747,6 +812,7 @@ pg_setup_get_local_connection_string(PostgresSetup *pgSetup,
 	 * usually), even when the configuration setup is using a unix directory
 	 * setting.
 	 */
+
 	if (env_found_empty("PG_REGRESS_SOCK_DIR") &&
 		(IS_EMPTY_STRING_BUFFER(pgSetup->pghost) ||
 		 pgSetup->pghost[0] == '/'))
@@ -768,6 +834,7 @@ pg_setup_get_local_connection_string(PostgresSetup *pgSetup,
 					 pg_regress_sock_dir,
 					 pgSetup->pghost);
 		}
+
 		appendPQExpBuffer(connStringBuffer, " host=%s", pgSetup->pghost);
 	}
 
