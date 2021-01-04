@@ -585,6 +585,8 @@ pgsql_retry_open_connection(PGSQL *pgsql)
 				log_debug("PQping OK after %d attempts",
 						  pgsql->retryPolicy.attempts);
 
+				pgsql->pingStatus = PG_CONNECTION_PING_OK;
+
 				/*
 				 * Ping is now ok, and connection is still NULL because the
 				 * first attempt to connect failed. Now is a good time to
@@ -639,6 +641,9 @@ pgsql_retry_open_connection(PGSQL *pgsql)
 			{
 				uint64_t now = time(NULL);
 
+				pgsql->pingStatus = PG_CONNECTION_PING_REJECT;
+
+
 				if (lastWarningMessage != PQPING_REJECT ||
 					(now - lastWarningTime) > 30)
 				{
@@ -666,6 +671,8 @@ pgsql_retry_open_connection(PGSQL *pgsql)
 			case PQPING_NO_RESPONSE:
 			{
 				uint64_t now = time(NULL);
+
+				pgsql->pingStatus = PG_CONNECTION_PING_NO_RESPONSE;
 
 				if (lastWarningMessage != PQPING_NO_RESPONSE ||
 					(now - lastWarningTime) > 30)
@@ -698,6 +705,7 @@ pgsql_retry_open_connection(PGSQL *pgsql)
 			 */
 			case PQPING_NO_ATTEMPT:
 			{
+				pgsql->pingStatus = PG_CONNECTION_PING_NO_ATTEMPT;
 				lastWarningMessage = PQPING_NO_ATTEMPT;
 				log_debug("Failed to ping server \"%s\" because of "
 						  "client-side problems (no attempt were made)",
@@ -1599,6 +1607,87 @@ pgsql_set_default_transaction_mode_read_write(PGSQL *pgsql)
 	log_info("Setting default_transaction_read_only to off");
 
 	return pgsql_alter_system_set(pgsql, setting);
+}
+
+
+/*
+ * pgsql_set_password sets the password for the given userName.
+ */
+bool
+pgsql_set_password(PGSQL *pgsql, const char *userName, const char *password)
+{
+	char command[BUFSIZE];
+	PGconn *connection = NULL;
+	char *escapedUsername = NULL;
+	char *escapedPassword = NULL;
+	bool success = true;
+	bool needsClose = false;
+
+	/*
+	 * Open a connection upfront since it is needed by PQescape functions. If
+	 * the connection is already open, we won't close it here, to enable
+	 * BEGIN/COMMIT workflows by callers.
+	 */
+	connection = pgsql->connection;
+	if (connection == NULL)
+	{
+		connection = pgsql_open_connection(pgsql);
+		if (connection == NULL)
+		{
+			/* error message was logged in pgsql_open_connection */
+			return false;
+		}
+
+		needsClose = true;
+	}
+
+	escapedUsername = PQescapeIdentifier(connection, userName, strlen(userName));
+	if (escapedUsername == NULL)
+	{
+		log_error("Failed to set password for username \"%s\": %s", userName,
+				  PQerrorMessage(connection));
+
+		success = false;
+		goto cleanup;
+	}
+
+	escapedPassword = PQescapeLiteral(connection, password, strlen(password));
+	if (escapedPassword == NULL)
+	{
+		log_error("Failed to set password for username \"%s\": %s", userName,
+				  PQerrorMessage(connection));
+
+		success = false;
+		goto cleanup;
+	}
+
+	sformat(command, MAXPGPATH, "ALTER USER %s PASSWORD %s",
+			escapedUsername, escapedPassword);
+
+	log_info("Setting the password for user: \"%s\"", userName);
+
+	if (!pgsql_execute(pgsql, command))
+	{
+		log_error("Failed to set password for userName \"%s\" "
+				  "see above for details", userName);
+		success = false;
+		goto cleanup;
+	}
+
+cleanup:
+	if (escapedUsername)
+	{
+		PQfreemem(escapedUsername);
+	}
+	if (escapedPassword)
+	{
+		PQfreemem(escapedPassword);
+	}
+	if (needsClose)
+	{
+		pgsql_finish(pgsql);
+	}
+	return success;
 }
 
 
