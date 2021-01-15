@@ -27,10 +27,54 @@
 #include "state.h"
 #include "service_keeper.h"
 #include "service_keeper_init.h"
+#include "service_pgbouncer.h"
 #include "service_postgres_ctl.h"
 #include "signals.h"
 #include "string_utils.h"
 #include "supervisor.h"
+
+/*
+ * service_keeper_handle_dynamic enables or disables dynamic services based on
+ * its configuration.
+ *
+ * Returns the number of services, positive when added, negative when removed.
+ */
+static int
+service_keeper_handle_dynamic(Supervisor *supervisor, void *arg)
+{
+	Keeper *keeper = (Keeper *) arg;
+	Service service = {
+		SERVICE_NAME_PGBOUNCER,
+		RP_PERMANENT,
+		-1,
+		&service_pgbouncer_start,
+		(void *) keeper,
+	};
+
+	/*
+	 * Do not bother to figure out if the value has changed, just read the
+	 * latest and act. Keeps the code much simpler.
+	 */
+	(void) keeper_reread_services(keeper);
+
+	if (!strncmp(keeper->config.pgbouncer, "enabled", strlen("enabled")))
+	{
+		if (!supervisor_service_exists(supervisor, service.name) &&
+			supervisor_add_dynamic(supervisor, &service))
+		{
+			return 1;
+		}
+	}
+	else if (!strncmp(keeper->config.pgbouncer, "disabled", strlen("disabled")))
+	{
+		if (supervisor_remove_dynamic(supervisor, service.name))
+		{
+			return -1;
+		}
+	}
+
+	return 0;
+}
 
 
 /*
@@ -66,9 +110,11 @@ service_keeper_init(Keeper *keeper)
 	if (createAndRun)
 	{
 		strlcpy(subprocesses[1].name, SERVICE_NAME_KEEPER, NAMEDATALEN);
+		return supervisor_start(subprocesses, subprocessesCount, pidfile,
+								&service_keeper_handle_dynamic, (void *) keeper);
 	}
 
-	return supervisor_start(subprocesses, subprocessesCount, pidfile);
+	return supervisor_start(subprocesses, subprocessesCount, pidfile, NULL, NULL);
 }
 
 
