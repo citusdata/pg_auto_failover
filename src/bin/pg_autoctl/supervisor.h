@@ -98,6 +98,7 @@ typedef struct Service
 {
 	char name[NAMEDATALEN];             /* Service name for the user */
 	RestartPolicy policy;               /* Should we restart the service? */
+	bool leader;                        /* Service leader? (only one allowed) */
 	pid_t pid;                          /* Service PID */
 	bool (*startFunction)(void *context, pid_t *pid);
 	void *context;             /* Service Context (Monitor or Keeper struct) */
@@ -106,6 +107,7 @@ typedef struct Service
 
 typedef struct Supervisor
 {
+	Service *serviceLeader;
 	Service *services;
 	int serviceCount;
 	char pidfile[MAXPGPATH];
