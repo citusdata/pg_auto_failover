@@ -26,6 +26,7 @@
 
 #define STR_ERRCODE_OBJECT_IN_USE "55006"
 #define STR_ERRCODE_EXCLUSION_VIOLATION "23P01"
+#define STR_ERRCODE_UNIQUE_VIOLATION "23505"
 
 #define STR_ERRCODE_SERIALIZATION_FAILURE "40001"
 #define STR_ERRCODE_STATEMENT_COMPLETION_UNKNOWN "40003"
@@ -1444,10 +1445,9 @@ parseNode(PGresult *result, int rowNumber, NodeAddress *node)
 {
 	if (PQgetisnull(result, rowNumber, 0) ||
 		PQgetisnull(result, rowNumber, 1) ||
-		PQgetisnull(result, rowNumber, 2) ||
-		PQgetisnull(result, rowNumber, 3))
+		PQgetisnull(result, rowNumber, 2))
 	{
-		log_error("NodeId, nodename, hostname or port returned by monitor is NULL");
+		log_error("NodeId, nodename, or hostname returned by monitor is NULL");
 		return false;
 	}
 
@@ -1480,12 +1480,21 @@ parseNode(PGresult *result, int rowNumber, NodeAddress *node)
 		return false;
 	}
 
-	value = PQgetvalue(result, rowNumber, 3);
-
-	if (!stringToInt(value, &node->port) || node->port == 0)
+	if (PQnfields(result) >= 4)
 	{
-		log_error("Invalid port number \"%s\" returned by monitor", value);
-		return false;
+		if (PQgetisnull(result, rowNumber, 3))
+		{
+			log_error("Port number returned by monitor is NULL");
+			return false;
+		}
+
+		value = PQgetvalue(result, rowNumber, 3);
+
+		if (!stringToInt(value, &node->port) || node->port == 0)
+		{
+			log_error("Invalid port number \"%s\" returned by monitor", value);
+			return false;
+		}
 	}
 
 	/*
@@ -1522,9 +1531,9 @@ parseNodeResult(void *ctx, PGresult *result)
 		return;
 	}
 
-	if (PQnfields(result) != 4)
+	if (PQnfields(result) != 3 && PQnfields(result) != 4)
 	{
-		log_error("Query returned %d columns, expected 3", PQnfields(result));
+		log_error("Query returned %d columns, expected 4", PQnfields(result));
 		context->parsedOK = false;
 		return;
 	}
@@ -4359,6 +4368,203 @@ prepare_connection_to_current_system_user(Monitor *source, Monitor *target)
 	target->pgsql.connectionStatementType = PGSQL_CONNECTION_MULTI_STATEMENT;
 
 	PQconninfoFree(conninfo);
+
+	return true;
+}
+
+
+/*
+ * monitor_register_archiver calls pgautofailover.register_archiver on the
+ * monitor.
+ */
+bool
+monitor_register_archiver(Monitor *monitor, char *name, char *host,
+						  NodeAddress *node)
+{
+	PGSQL *pgsql = &monitor->pgsql;
+	const char *sql = "SELECT * FROM pgautofailover.register_archiver($1, $2)";
+
+	int paramCount = 2;
+	Oid paramTypes[2] = { TEXTOID, TEXTOID };
+	const char *paramValues[2];
+
+	NodeAddressParseContext parseContext = { { 0 }, node, false };
+
+	paramValues[0] = name;
+	paramValues[1] = host;
+
+	if (!pgsql_execute_with_params(pgsql, sql,
+								   paramCount, paramTypes, paramValues,
+								   &parseContext, parseNodeResult))
+	{
+		log_error("Failed to register archiver \"%s\" (\"%s\") to the monitor",
+				  name, host);
+		return false;
+	}
+
+	if (!parseContext.parsedOK)
+	{
+		/* errors have already been logged */
+		return false;
+	}
+
+	log_info("Registered archiver \"%s\" %d (\"%s\") on the monitor",
+			 node->name, node->nodeId, node->host);
+
+	return true;
+}
+
+
+/*
+ * monitor_drop_archiver calls pgautofailover.remove_archiver on the monitor.
+ */
+bool
+monitor_drop_archiver(Monitor *monitor, int archiverId)
+{
+	PGSQL *pgsql = &monitor->pgsql;
+	const char *sql = "SELECT * FROM pgautofailover.remove_archiver($1)";
+
+	int paramCount = 1;
+	Oid paramTypes[1] = { INT4OID };
+	const char *paramValues[1] = { 0 };
+
+	paramValues[0] = intToString(archiverId).strValue;
+
+	if (!pgsql_execute_with_params(pgsql, sql,
+								   paramCount, paramTypes, paramValues,
+								   NULL, NULL))
+	{
+		log_error("Failed to drop archiver %d from the monitor", archiverId);
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * monitor_register_archiver_node performs the initial registration of an
+ * archiver node with the monitor in the given formation.
+ *
+ * The caller must specify a groupId that already exists on the monitor, and
+ * that is not empty. An archiver node is a standby with some special settings,
+ * so another node is expected to exist in the group already.
+ *
+ * The initialState can also used to indicate that the archiver node is already
+ * correctly initialized in a particular state. This can be useful when
+ * bringing back a node after replacing the monitor.
+ *
+ * The node ID selected by the monitor, as well as the goal state, are set in
+ * assignedState, which must not be NULL.
+ */
+bool
+monitor_register_archiver_node(Monitor *monitor,
+							   int archiverId,
+							   char *formation,
+							   char *name, char *host, int port,
+							   uint64_t system_identifier,
+							   char *dbname,
+							   int desiredNodeId,
+							   int desiredGroupId,
+							   NodeState initialState,
+							   PgInstanceKind kind,
+							   bool quorum,
+							   bool *mayRetry,
+							   MonitorAssignedState *assignedState)
+{
+	PGSQL *pgsql = &monitor->pgsql;
+	const char *sql =
+		"SELECT * FROM pgautofailover.register_archiver_node"
+		"($1, $2, $3, $4, $5, $6, $7, "
+		"$8, $9, $10::pgautofailover.replication_state, $11, $12)";
+	int paramCount = 12;
+	Oid paramTypes[12] = {
+		INT4OID, TEXTOID, TEXTOID, INT4OID, NAMEOID, TEXTOID,
+		INT8OID, INT4OID, INT4OID, TEXTOID, TEXTOID, BOOLOID
+	};
+	const char *paramValues[12];
+	MonitorAssignedStateParseContext parseContext = {
+		{ 0 }, assignedState, false
+	};
+	const char *nodeStateString = NodeStateToString(initialState);
+
+	paramValues[0] = intToString(archiverId).strValue;
+	paramValues[1] = formation;
+	paramValues[2] = host;
+	paramValues[3] = intToString(port).strValue;
+	paramValues[4] = dbname;
+	paramValues[5] = name == NULL ? "" : name;
+	paramValues[6] = intToString(system_identifier).strValue;
+	paramValues[7] = intToString(desiredNodeId).strValue;
+	paramValues[8] = intToString(desiredGroupId).strValue;
+	paramValues[9] = nodeStateString;
+	paramValues[10] = nodeKindToString(kind);
+	paramValues[11] = quorum ? "true" : "false";
+
+	if (!pgsql_execute_with_params(pgsql, sql,
+								   paramCount, paramTypes, paramValues,
+								   &parseContext, parseNodeState))
+	{
+		if (monitor_retryable_error(parseContext.sqlstate) ||
+			strcmp(parseContext.sqlstate, STR_ERRCODE_OBJECT_IN_USE) == 0)
+		{
+			*mayRetry = true;
+			return false;
+		}
+		else if (strcmp(parseContext.sqlstate,
+						STR_ERRCODE_EXCLUSION_VIOLATION) == 0)
+		{
+			/* *INDENT-OFF* */
+			log_error("Failed to register archiver node for archiver %d "
+					  "in group %d of formation \"%s\" "
+					  "with system_identifier %" PRIu64 ", "
+					  "because another node already exists in this group with "
+					  "another system_identifier",
+					  archiverId, desiredGroupId, formation, system_identifier);
+			/* *INDENT-ON* */
+
+			log_info(
+				"HINT: you may register a standby node from a non-existing "
+				"PGDATA directory that pg_autoctl then creates for you, or "
+				"PGDATA should be a copy of the current primary node such as "
+				"obtained from a backup and recovery tool.");
+			return false;
+		}
+		else if (strcmp(parseContext.sqlstate,
+						STR_ERRCODE_UNIQUE_VIOLATION) == 0)
+		{
+			log_error("Failed to register archiver node for archiver %d "
+					  "in group %d of formation \"%s\" "
+					  "because this archiver (%d) already has an archiver node "
+					  "registered for group %d of formation \"%s\"",
+					  archiverId, desiredGroupId, formation,
+					  archiverId, desiredGroupId, formation);
+
+			return false;
+		}
+
+		log_error("Failed to register archiver node for archiver %d "
+				  "in group %d of formation \"%s\" "
+				  "with initial state \"%s\", see previous lines for details",
+				  archiverId, desiredGroupId, formation, nodeStateString);
+		return false;
+	}
+
+	if (!parseContext.parsedOK)
+	{
+		log_error("Failed to register archiver node for archiver %d "
+				  "in group %d of formation \"%s\" "
+				  "with initial state \"%s\" because the monitor returned an "
+				  "unexpected result, see previous lines for details",
+				  archiverId, desiredGroupId, formation, nodeStateString);
+		return false;
+	}
+
+	log_info("Registered archiver node %d (%s:%d) with name \"%s\" "
+			 "in formation \"%s\", group %d, state \"%s\"",
+			 assignedState->nodeId, host, port, assignedState->name,
+			 formation, assignedState->groupId,
+			 NodeStateToString(assignedState->state));
 
 	return true;
 }

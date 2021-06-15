@@ -18,12 +18,16 @@
 
 #define KEEPER_ROLE "keeper"
 #define MONITOR_ROLE "monitor"
+#define ARCHIVER_ROLE "archiver"
+#define ARCHIVER_NODE_ROLE "archiver_node"
 
 typedef enum
 {
 	PG_AUTOCTL_ROLE_UNKNOWN,
 	PG_AUTOCTL_ROLE_MONITOR,
-	PG_AUTOCTL_ROLE_KEEPER
+	PG_AUTOCTL_ROLE_KEEPER,
+	PG_AUTOCTL_ROLE_ARCHIVER,
+	PG_AUTOCTL_ROLE_ARCHIVER_NODE
 } pgAutoCtlNodeRole;
 
 typedef struct MinimalConfig
@@ -73,6 +77,7 @@ bool SetStateFilePath(ConfigFilePaths *pathnames, const char *pgdata);
 bool SetNodesFilePath(ConfigFilePaths *pathnames, const char *pgdata);
 bool SetPidFilePath(ConfigFilePaths *pathnames, const char *pgdata);
 
+pgAutoCtlNodeRole NodeRoleFromString(const char *role);
 pgAutoCtlNodeRole ProbeConfigurationFileRole(const char *filename);
 
 

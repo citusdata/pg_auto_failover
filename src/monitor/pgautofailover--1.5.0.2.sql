@@ -56,8 +56,7 @@ CREATE TABLE pgautofailover.formation
  );
 
 insert into pgautofailover.formation (formationid, dbname)
-     values ('monitor', 'pg_auto_failover'),
-            ('default', DEFAULT);
+     values ('monitor', 'pg_auto_failover'), ('default', DEFAULT);
 
 CREATE FUNCTION pgautofailover.create_formation
  (
@@ -121,7 +120,6 @@ CREATE TABLE pgautofailover.node
     statechangetime      timestamptz not null default now(),
     candidatepriority	 int not null default 100,
     replicationquorum	 bool not null default true,
-    nodecluster          text not null default 'default',
 
     -- node names must be unique in a given formation
     UNIQUE (formationid, nodename),
@@ -190,8 +188,8 @@ CREATE TABLE pgautofailover.archiver
  );
 
 --
--- A pg_auto_failover archiver can be registered to handle many formations.
--- A single formation can also be taken care of by more than one archiver
+-- A pg_auto_failover archiver can be registered to handle many formation. A
+-- single formation can also be taken care of by more than one archiver
 -- (redundancy). When more than one archiver is active for a single given
 -- formation, archivers may have different archiving policies. That's also
 -- useful for migrating to new archivers and policies.
@@ -200,6 +198,11 @@ CREATE TABLE pgautofailover.archiver_policy
  (
     archiverid           bigint not null,
     formationid          text not null default 'default',
+    opt_archive_local    bool not null default 'yes',
+
+    opt_archive_remote   bool not null default 'no',
+    archive_command      text, -- wal-g wal-push /path/to/archive
+    backup_command       text, -- wal-g backup-push /backup/directory/path
 
     apply_delay          interval not null default '6 hours',
     backup_interval      interval not null default '6 hours',
@@ -214,7 +217,7 @@ CREATE TABLE pgautofailover.archiver_policy
 
 --
 -- A pg_auto_failover archiver handles N formation/groups, and for each of
--- them it runs an archiver_node, which is a full pg_auto_failover node
+-- them it run an archiver_node, which is a full pg_auto_failover node
 -- (can't be a candidate for failover though). The archiver_node table is an
 -- association table between the archiver and the node.
 --
@@ -227,10 +230,8 @@ CREATE TABLE pgautofailover.archiver_node
  (
     archiverid           bigint not null,
     nodeid               bigint not null,
-    groupid              int not null,
 
     PRIMARY KEY (archiverid, nodeid),
-    UNIQUE (archiverid, groupid),
 
     FOREIGN KEY (archiverid) REFERENCES pgautofailover.archiver(archiverid),
     FOREIGN KEY (nodeid) REFERENCES pgautofailover.node(nodeid)
@@ -349,13 +350,11 @@ CREATE FUNCTION pgautofailover.register_node
     IN dbname               name,
     IN node_name            text default '',
     IN sysidentifier        bigint default 0,
-    IN desired_node_id      int default -1,
     IN desired_group_id     int default -1,
     IN initial_group_role   pgautofailover.replication_state default 'init',
     IN node_kind            text default 'standalone',
     IN candidate_priority 	int default 100,
     IN replication_quorum	bool default true,
-    IN node_cluster         text default 'default',
    OUT assigned_node_id     int,
    OUT assigned_group_id    int,
    OUT assigned_group_state pgautofailover.replication_state,
@@ -367,9 +366,7 @@ RETURNS record LANGUAGE C STRICT SECURITY DEFINER
 AS 'MODULE_PATHNAME', $$register_node$$;
 
 grant execute on function
-      pgautofailover.register_node(text,text,int,name,text,bigint,int,int,
-                                   pgautofailover.replication_state,text,
-                                   int,bool,text)
+      pgautofailover.register_node(text,text,int,name,text,bigint,int,pgautofailover.replication_state,text, int, bool)
    to autoctl_node;
 
 
@@ -386,52 +383,6 @@ AS 'MODULE_PATHNAME', $$register_archiver$$;
 
 grant execute on function
       pgautofailover.register_archiver(text,text)
-   to autoctl_node;
-
-
-CREATE FUNCTION pgautofailover.remove_archiver
- (
-   archiver_id int
- )
-RETURNS bool LANGUAGE C STRICT SECURITY DEFINER
-AS 'MODULE_PATHNAME', $$remove_archiver_by_archiverid$$;
-
-comment on function pgautofailover.remove_archiver(int)
-        is 'remove a node from the monitor';
-
-grant execute on function pgautofailover.remove_archiver(int)
-   to autoctl_node;
-
-
-CREATE FUNCTION pgautofailover.register_archiver_node
- (
-    IN archiver_id          int,
-    IN formation_id         text,
-    IN node_host            text,
-    IN node_port            int,
-    IN dbname               name,
-    IN node_name            text default '',
-    IN sysidentifier        bigint default 0,
-    IN desired_node_id      int default -1,
-    IN desired_group_id     int default 0,
-    IN initial_group_role   pgautofailover.replication_state default 'init',
-    IN node_kind            text default 'standalone',
-    IN replication_quorum	bool default false,
-   OUT assigned_node_id     int,
-   OUT assigned_group_id    int,
-   OUT assigned_group_state pgautofailover.replication_state,
-   OUT assigned_candidate_priority 	int,
-   OUT assigned_replication_quorum  bool,
-   OUT assigned_node_name   text
- )
-RETURNS record LANGUAGE C STRICT SECURITY DEFINER
-AS 'MODULE_PATHNAME', $$register_archiver_node$$;
-
-grant execute on function
-      pgautofailover.register_archiver_node(int,
-                                            text,text,int,name,text,bigint,int,int,
-                                            pgautofailover.replication_state,text,
-                                            bool)
    to autoctl_node;
 
 
@@ -802,7 +753,6 @@ comment on function pgautofailover.current_state(text, int)
 CREATE FUNCTION pgautofailover.formation_uri
  (
     IN formation_id         text DEFAULT 'default',
-    IN cluster_name         text DEFAULT 'default',
     IN sslmode              text DEFAULT 'prefer',
     IN sslrootcert          text DEFAULT '',
     IN sslcrl               text DEFAULT ''
@@ -812,15 +762,11 @@ AS $$
     select case
            when string_agg(format('%s:%s', nodehost, nodeport),',') is not null
            then format(
-               'postgres://%s/%s?%ssslmode=%s%s%s',
+               'postgres://%s/%s?target_session_attrs=read-write&sslmode=%s%s%s',
                string_agg(format('%s:%s', nodehost, nodeport),','),
                -- as we join formation on node we get the same dbname for all
                -- entries, pick one.
                min(dbname),
-               case when cluster_name = 'default'
-                    then 'target_session_attrs=read-write&'
-                    else ''
-               end,
                min(sslmode),
                CASE WHEN min(sslrootcert) = ''
                    THEN ''
@@ -835,8 +781,7 @@ AS $$
       from pgautofailover.node as node
            join pgautofailover.formation using(formationid)
      where formationid = formation_id
-       and groupid = 0
-       and nodecluster = cluster_name;
+       and groupid = 0;
 $$;
 
 CREATE FUNCTION pgautofailover.enable_secondary

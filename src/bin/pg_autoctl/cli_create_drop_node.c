@@ -59,8 +59,6 @@ static void cli_drop_monitor(int argc, char **argv);
 
 static void cli_drop_node_from_monitor(KeeperConfig *config);
 
-static void check_hostname(const char *hostname);
-
 CommandLine create_monitor_command =
 	make_command(
 		"monitor",
@@ -126,6 +124,7 @@ CommandLine drop_node_command =
 		"  --destroy     also destroy Postgres database\n",
 		cli_drop_node_getopts,
 		cli_drop_node);
+
 
 /*
  * cli_create_config manages the whole set of configuration parameters that
@@ -1466,7 +1465,7 @@ discover_hostname(char *hostname, int size,
  * file and then compares the IP addresses obtained to the client IP address,
  * and refuses the connection where there's no match.
  */
-static void
+void
 check_hostname(const char *hostname)
 {
 	char localIpAddress[INET_ADDRSTRLEN];

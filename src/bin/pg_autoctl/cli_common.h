@@ -13,6 +13,8 @@
 
 #include <getopt.h>
 
+#include "archiver.h"
+#include "archiver_config.h"
 #include "keeper.h"
 #include "keeper_config.h"
 #include "monitor.h"
@@ -93,6 +95,10 @@ extern CommandLine drop_node_command;
 extern CommandLine drop_monitor_command;
 extern CommandLine destroy_command;
 
+/* cli_archiver.c */
+extern CommandLine create_archiver_command;
+extern CommandLine drop_archiver_command;
+
 /* cli_get_set_properties.c */
 extern CommandLine get_commands;
 extern CommandLine set_commands;
@@ -144,7 +150,6 @@ typedef enum
 void keeper_cli_help(int argc, char **argv);
 int cli_print_version_getopts(int argc, char **argv);
 void keeper_cli_print_version(int argc, char **argv);
-void cli_pprint_json(JSON_Value *js);
 
 void cli_common_get_set_pgdata_or_exit(PostgresSetup *pgSetup);
 
@@ -195,8 +200,24 @@ void cli_ensure_node_name(Keeper *keeper);
 
 bool discover_hostname(char *hostname, int size,
 					   const char *monitorHostname, int monitorPort);
+void check_hostname(const char *hostname);
 
 /* cli_get_set_properties.c */
 void cli_get_formation_settings(int argc, char **argv);
+
+/* cli_archiver.c */
+extern ArchiverConfig archiverOptions;
+extern CreateArchiverNodeOpts createArchiveNodeOptions;
+extern AddArchiverNodeOpts addArchiverNodeOptions;
+
+#define ARCHIVER_CLI_OPTIONS \
+	"  --directory       top-level directory where to handle archives\n" \
+	"  --monitor         pg_auto_failover Monitor Postgres URL\n" \
+	"  --hostname        hostname by which postgres is reachable\n" \
+	"  --name            name of this archiver\n"
+
+#define ARCHIVER_CLI_USAGE " --monitor --directory [ --hostname --name ] "
+
+int cli_create_archiver_getopts(int argc, char **argv);
 
 #endif  /* CLI_COMMON_H */
