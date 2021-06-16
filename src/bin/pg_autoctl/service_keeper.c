@@ -62,17 +62,19 @@ start_keeper(Keeper *keeper)
 
 	Service subprocesses[] = {
 		{
-			SERVICE_NAME_POSTGRES,
-			RP_PERMANENT,
-			-1,
-			&service_postgres_ctl_start
+			.name = SERVICE_NAME_POSTGRES,
+			.policy = RP_PERMANENT,
+			.leader = false,
+			.pid = -1,
+			.startFunction = &service_postgres_ctl_start
 		},
 		{
-			SERVICE_NAME_KEEPER,
-			RP_PERMANENT,
-			-1,
-			&service_keeper_start,
-			(void *) keeper
+			.name = SERVICE_NAME_KEEPER,
+			.policy = RP_PERMANENT,
+			.leader = true,
+			.pid = -1,
+			.startFunction = &service_keeper_start,
+			.context = (void *) keeper
 		}
 	};
 
@@ -254,7 +256,19 @@ keeper_node_active_loop(Keeper *keeper, pid_t start_pid)
 	bool warnedOnCurrentIteration = false;
 	bool warnedOnPreviousIteration = false;
 
+	bool shutdownSequenceInProgress = false;
+	bool couldStartMaintenanceAtShutdown = false;
+	bool reachedMaintenanceAtShutdown = false;
+
+	bool shutdownInMaintenance =
+		keeperState->service_state == SERVICE_SHUTDOWN_IN_MAINTENANCE;
+
+	bool disabledMaintenanceAtStartup = false;
+	bool shouldDisableMaintenanceAtStartup = shutdownInMaintenance;
+
 	log_debug("pg_autoctl service is starting");
+
+	keeperState->service_state = SERVICE_STARTUP;
 
 	/* setup our monitor client connection with our notification handler */
 	(void) monitor_setup_notifications(monitor,
@@ -322,8 +336,17 @@ keeper_node_active_loop(Keeper *keeper, pid_t start_pid)
 			(void) keeper_call_reload_hooks(keeper, firstLoop, doInit);
 		}
 
-		if (asked_to_stop || asked_to_stop_fast || asked_to_quit)
+		if (asked_to_stop_fast || asked_to_quit)
 		{
+			/*
+			 * Refrain from editing service_state when shutdown is already in
+			 * progress.
+			 */
+			if (!shutdownSequenceInProgress)
+			{
+				shutdownSequenceInProgress = true;
+				keeperState->service_state = SERVICE_SHUTDOWNING;
+			}
 			break;
 		}
 
@@ -351,11 +374,72 @@ keeper_node_active_loop(Keeper *keeper, pid_t start_pid)
 			continue;
 		}
 
+		/*
+		 * Upon receiving SIGTERM, start maintenance on the monitor, possibly
+		 * triggering a failover when the primary node is being shut down.
+		 */
+		if (asked_to_stop)
+		{
+			/*
+			 * When the monitor is disabled, SIGTERM is the same as SIGINT.
+			 */
+			if (config->monitorDisabled)
+			{
+				shutdownSequenceInProgress = true;
+				keeperState->service_state = SERVICE_SHUTDOWNING;
+
+				break;
+			}
+			/* Shutdown Sequence in progress, and maintenance enabled */
+			else if (shutdownSequenceInProgress &&
+					 couldStartMaintenanceAtShutdown)
+			{
+				log_warn("Shutdown in progress");
+			}
+			/* Trigger the shutdown sequence and enable maintenance now */
+			else if (keeperState->current_role != MAINTENANCE_STATE &&
+					 keeperState->current_role != PREPARE_MAINTENANCE_STATE)
+			{
+				int nodeId = keeper->state.current_node_id;
+				bool mayRetry = false;
+
+				log_info("Enabling maintenance on this node for shutdown");
+
+				/*
+				 * Make sure that at restart, we get out of maintenance, even
+				 * if we later receive a stronger signal such as SIGINT
+				 * (asked_to_stop_fast) or SIGQUIT (asked_to_quit).
+				 */
+				keeperState->service_state = SERVICE_SHUTDOWN_IN_MAINTENANCE;
+
+				if (keeper_store_state(keeper) &&
+					monitor_start_maintenance(monitor, nodeId, &mayRetry))
+				{
+					couldStartMaintenanceAtShutdown = true;
+				}
+				else
+				{
+					int timeoutUs = PG_AUTOCTL_KEEPER_SLEEP_TIME * 1000 * 1000;
+
+					/* warning: we're going to try again */
+					log_warn("Failed to start maintenance "
+							 "upon receiving SIGTERM");
+
+					pg_usleep(timeoutUs);
+				}
+			}
+
+			/* in all cases, shutdown is now in progress */
+			shutdownSequenceInProgress = true;
+		}
+
 		if (firstLoop)
 		{
 			log_info("pg_autoctl service is running, "
 					 "current state is \"%s\"",
 					 NodeStateToString(keeperState->current_role));
+
+			keeperState->service_state = SERVICE_RUNNING;
 		}
 
 		/*
@@ -512,6 +596,62 @@ keeper_node_active_loop(Keeper *keeper, pid_t start_pid)
 			}
 		}
 
+		/*
+		 * When we receive SIGTERM, we enable maintenance on the monitor, and
+		 * we record this action in the Keeper State file. At startup, we then
+		 * disable maintenance again. We might have to retry disabling
+		 * maintenance should it fail.
+		 *
+		 * The shutdown sequence might also have been interrupted in
+		 * wait_maintenance state, in which case we want to first finish the
+		 * FSM transition to maintenance, and only later disable maintenance.
+		 *
+		 * Finally we must also consider the following case:
+		 *
+		 *  pg_autoctl stop
+		 *  pg_autoctl disable maintenance
+		 *  pg_autoctl run
+		 *
+		 * The manual call to disable maintenance has the effect of the monitor
+		 * assigning CATCHINGUP to the node, and at startup we implement the
+		 * transition to there. We must remember that in this case we should
+		 * consider that our job with disabling maintenance at startup is done
+		 * already.
+		 */
+		bool assignedOneOfTheMaintenanceStates =
+			keeperState->assigned_role == MAINTENANCE_STATE ||
+			keeperState->assigned_role == PREPARE_MAINTENANCE_STATE ||
+			keeperState->assigned_role == WAIT_MAINTENANCE_STATE;
+
+		if (shouldDisableMaintenanceAtStartup &&
+			!assignedOneOfTheMaintenanceStates)
+		{
+			shouldDisableMaintenanceAtStartup = false;
+		}
+		else if (shutdownInMaintenance &&
+				 shouldDisableMaintenanceAtStartup &&
+				 !disabledMaintenanceAtStartup &&
+				 keeperState->assigned_role == MAINTENANCE_STATE &&
+				 keeperState->current_role == keeperState->assigned_role &&
+				 !needStateChange)
+		{
+			int nodeId = keeper->state.current_node_id;
+			bool mayRetry = false;
+
+			log_info("pg_autoctl node was put in maintenance as part of "
+					 "shutting down, now disabling maintenance");
+
+			if (monitor_stop_maintenance(monitor, nodeId, &mayRetry))
+			{
+				disabledMaintenanceAtStartup = true;
+			}
+			else
+			{
+				/* errors have already been logged */
+				log_debug("Failed to disable maintenance at startup");
+			}
+		}
+
 		/* now is a good time to make sure we're closing our connections */
 		pgsql_finish(&(postgres->sqlClient));
 
@@ -544,7 +684,63 @@ keeper_node_active_loop(Keeper *keeper, pid_t start_pid)
 			doSleep = false;
 		}
 
-		if (asked_to_stop || asked_to_stop_fast)
+		/*
+		 * On SIGTERM, we call pgautofailover.start_maintenance() on the
+		 * monitor and wait until fully registered in maintenance mode before
+		 * shutting down this process, and having the supervisor then shutdown
+		 * Postgres.
+		 */
+		if (shutdownSequenceInProgress)
+		{
+			/* are we completely done? */
+			if (keeperState->assigned_role == MAINTENANCE_STATE &&
+				keeperState->current_role == keeperState->assigned_role &&
+				couldStartMaintenanceAtShutdown &&
+				reachedMaintenanceAtShutdown)
+			{
+				keepRunning = false;
+				log_info("Shutdown sequence complete: reached state \"%s\"",
+						 NodeStateToString(MAINTENANCE_STATE));
+			}
+			/*
+			 * When reaching maintenance, we need another loop to call
+			 * node_active() on the monitor. Register that we reached the
+			 * maintenance state locally so that we can complete shutdown at
+			 * next iteration.
+			 */
+			else if (keeperState->assigned_role == MAINTENANCE_STATE &&
+					 keeperState->current_role == keeperState->assigned_role &&
+					 couldStartMaintenanceAtShutdown)
+			{
+				reachedMaintenanceAtShutdown = true;
+			}
+			/*
+			 * When we're already in the MAINTENANCE state, even though
+			 * couldStartMaintenanceAtShutdown is false, it means the local
+			 * node was already in maintenance, we can just shutdown now.
+			 */
+			else if (keeperState->assigned_role == MAINTENANCE_STATE &&
+					 keeperState->current_role == keeperState->assigned_role)
+			{
+				log_info("Shutdown sequence activated while in maintenance");
+
+				shutdownSequenceInProgress = true;
+				keeperState->service_state = SERVICE_SHUTDOWNING;
+
+				break;
+			}
+			/* shutdown still in progress (wait_maintenance, etc) */
+			else
+			{
+				log_debug("Shutdown sequence in progress: "
+						  "waiting until state \"%s\" is reached, now at %s/%s",
+						  NodeStateToString(MAINTENANCE_STATE),
+						  NodeStateToString(keeperState->current_role),
+						  NodeStateToString(keeperState->assigned_role));
+			}
+		}
+
+		if (asked_to_stop_fast)
 		{
 			keepRunning = false;
 		}
@@ -596,6 +792,28 @@ keeper_node_active_loop(Keeper *keeper, pid_t start_pid)
 
 	/* One last check that we do not have any connections open */
 	pgsql_finish(&(keeper->monitor.pgsql));
+
+	/*
+	 * When shutdown is already in progress, we might have a service_state set
+	 * to SERVICE_SHUTDOWN_IN_MAINTENANCE and we want to keep that. That said,
+	 * CHECK_FOR_FAST_SHUTDOWN is a straight break to this point at the end of
+	 * the loop, so the state might still be SERVICE_RUNNING.
+	 *
+	 * Other case is having receveived SIGINT (asked_to_stop_fast) and then we
+	 * registered SERVICE_SHUTDOWNING, and now is the time to clear that up and
+	 * set SERVICE_SHUTDOWNED instead.
+	 */
+	if (!shutdownSequenceInProgress ||
+		keeperState->service_state == SERVICE_RUNNING ||
+		keeperState->service_state == SERVICE_SHUTDOWNING)
+	{
+		keeperState->service_state = SERVICE_SHUTDOWNED;
+	}
+
+	if (!keeper_store_state(keeper))
+	{
+		/* errors have already been logged */
+	}
 
 	return true;
 }

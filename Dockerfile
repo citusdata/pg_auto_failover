@@ -36,7 +36,7 @@ RUN apt-get update \
     postgresql-server-dev-${PGVERSION} \
 	&& rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install pyroute2>=0.5.17
+RUN pip3 install pyroute2>=0.6.4
 
 # install Postgres 11 (current in bullseye), bypass initdb of a "main" cluster
 RUN echo 'create_main_cluster = false' | sudo tee -a /etc/postgresql-common/createcluster.conf
@@ -44,7 +44,6 @@ RUN apt-get update\
 	&& apt-get install -y --no-install-recommends postgresql-${PGVERSION} \
 	&& rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install pyroute2>=0.5.17
 RUN adduser --disabled-password --gecos '' docker
 RUN adduser docker sudo
 RUN adduser docker postgres
