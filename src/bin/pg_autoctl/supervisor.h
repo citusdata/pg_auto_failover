@@ -93,9 +93,21 @@ typedef struct RestartCounters
  * seen by the supervisor.
  *
  * In particular, services may be started more than once when they fail.
+ *
+ * A supervisor can also work with an array of "dynamic services". Those differ
+ * from the array described above as they can be added or removed at any point.
+ * Even if a dynamic service has been added during start up, it will be started
+ * after the static services have been started succefully.
+ * Another difference is when a dynanic service has exhausted it's restart
+ * attempts, the supervisor will choose to stop this particular service instead
+ * of shutting down.
+ *
+ * What differenciates the two different kinds of services, is their location in
+ * the supervisor struct. They look indentical otherwise.
  */
 typedef struct Service
 {
+	char role[NAMEDATALEN];             /* Service role for the user */
 	char name[NAMEDATALEN];             /* Service name for the user */
 	RestartPolicy policy;               /* Should we restart the service? */
 	pid_t pid;                          /* Service PID */
@@ -104,20 +116,35 @@ typedef struct Service
 	RestartCounters restartCounters;
 } Service;
 
+/*
+ * Helper struct for an array of services
+ */
+typedef struct ServiceArray
+{
+	int serviceCount;
+	Service array[MAX_SERVICES];
+} ServiceArray;
+
 typedef struct Supervisor
 {
-	Service *services;
-	int serviceCount;
+	ServiceArray services;
+
 	char pidfile[MAXPGPATH];
 	pid_t pid;
 	bool cleanExit;
 	bool shutdownSequenceInProgress;
 	int shutdownSignal;
 	int stoppingLoopCounter;
+
+	/* dynamic services section */
+	bool const allowDynamic;    /* can dynamic services be added/removed? */
+
+	ServiceArray dynamicServicesEnabled; /* currently enabled dynamic services */
+	ServiceArray dynamicServicesDisabled; /* internal accounting */
 } Supervisor;
 
-
-bool supervisor_start(Service services[], int serviceCount, const char *pidfile);
+bool supervisor_start(ServiceArray services, const char *pidfile,
+					  bool allowDynamic);
 
 bool supervisor_stop(Supervisor *supervisor);
 

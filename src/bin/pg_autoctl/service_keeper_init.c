@@ -43,32 +43,36 @@ bool
 service_keeper_init(Keeper *keeper)
 {
 	const char *pidfile = keeper->config.pathnames.pid;
-
-	Service subprocesses[] = {
-		{
-			SERVICE_NAME_POSTGRES,
-			RP_PERMANENT,
-			-1,
-			&service_postgres_ctl_start,
+	ServiceArray services = {
+		.array = {
+			{
+				SERVICE_NAME_POSTGRES,
+				SERVICE_NAME_POSTGRES,
+				RP_PERMANENT,
+				-1,
+				&service_postgres_ctl_start,
+			},
+			{
+				SERVICE_NAME_KEEPER_INIT,
+				SERVICE_NAME_KEEPER_INIT,
+				createAndRun ? RP_PERMANENT : RP_TRANSIENT,
+				-1,
+				&service_keeper_init_start,
+				(void *) keeper
+			},
 		},
-		{
-			SERVICE_NAME_KEEPER_INIT,
-			createAndRun ? RP_PERMANENT : RP_TRANSIENT,
-			-1,
-			&service_keeper_init_start,
-			(void *) keeper
-		}
+		.serviceCount = 2,
 	};
-
-	int subprocessesCount = sizeof(subprocesses) / sizeof(subprocesses[0]);
 
 	/* when using pg_autoctl create monitor --run, use "node-active" */
 	if (createAndRun)
 	{
-		strlcpy(subprocesses[1].name, SERVICE_NAME_KEEPER, NAMEDATALEN);
+		strlcpy(services.array[1].role, SERVICE_NAME_KEEPER, NAMEDATALEN);
+		strlcpy(services.array[1].name, SERVICE_NAME_KEEPER, NAMEDATALEN);
+		return supervisor_start(services, pidfile, true /* allowDynamic */);
 	}
 
-	return supervisor_start(subprocesses, subprocessesCount, pidfile);
+	return supervisor_start(services, pidfile, false /* allowDynamic */);
 }
 
 

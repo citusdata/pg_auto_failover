@@ -366,15 +366,18 @@ cli_do_service_pgcontroller(int argc, char **argv)
 {
 	ConfigFilePaths pathnames = { 0 };
 	LocalPostgresServer postgres = { 0 };
-
-	Service subprocesses[] = {
-		"postgres",
-		RP_PERMANENT,
-		-1,
-		&service_postgres_ctl_start
+	ServiceArray services = {
+		.array = {
+			{
+				"postgres",
+				"postgres",
+				RP_PERMANENT,
+				-1,
+				&service_postgres_ctl_start
+			},
+		},
+		.serviceCount = 1,
 	};
-
-	int subprocessesCount = sizeof(subprocesses) / sizeof(subprocesses[0]);
 
 	bool exitOnQuit = false;
 
@@ -387,7 +390,7 @@ cli_do_service_pgcontroller(int argc, char **argv)
 		exit(EXIT_CODE_BAD_CONFIG);
 	}
 
-	if (!supervisor_start(subprocesses, subprocessesCount, pathnames.pid))
+	if (!supervisor_start(services, pathnames.pid, false /* allowDynamic */))
 	{
 		log_fatal("Failed to start the supervisor, see above for details");
 		exit(EXIT_CODE_INTERNAL_ERROR);

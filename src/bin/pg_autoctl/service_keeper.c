@@ -59,26 +59,28 @@ bool
 start_keeper(Keeper *keeper)
 {
 	const char *pidfile = keeper->config.pathnames.pid;
-
-	Service subprocesses[] = {
-		{
-			SERVICE_NAME_POSTGRES,
-			RP_PERMANENT,
-			-1,
-			&service_postgres_ctl_start
+	ServiceArray services = {
+		.array = {
+			{
+				SERVICE_NAME_POSTGRES,
+				SERVICE_NAME_POSTGRES,
+				RP_PERMANENT,
+				-1,
+				&service_postgres_ctl_start
+			},
+			{
+				SERVICE_NAME_KEEPER,
+				SERVICE_NAME_KEEPER,
+				RP_PERMANENT,
+				-1,
+				&service_keeper_start,
+				(void *) keeper
+			},
 		},
-		{
-			SERVICE_NAME_KEEPER,
-			RP_PERMANENT,
-			-1,
-			&service_keeper_start,
-			(void *) keeper
-		}
+		.serviceCount = 2,
 	};
 
-	int subprocessesCount = sizeof(subprocesses) / sizeof(subprocesses[0]);
-
-	return supervisor_start(subprocesses, subprocessesCount, pidfile);
+	return supervisor_start(services, pidfile, false /* allowDynamic */);
 }
 
 
