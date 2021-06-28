@@ -1,0 +1,9 @@
+name: 'Container Test'
+trigger: none
+pool:
+  vmImage: 'ubuntu-18.04'
+
+container: ubuntu:18.04
+
+steps:
+  - script: printenv

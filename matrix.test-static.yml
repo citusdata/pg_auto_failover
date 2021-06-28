@@ -1,0 +1,20 @@
+name: "Static matrix test"
+pr: none
+trigger:
+  - none
+jobs:
+  - job: Test
+    strategy:
+      maxParallel: 2
+      matrix:
+        US_IE:
+          Location: US
+          Browser: IE
+        US_Chrome:
+          Location: US
+          Browser: Chrome
+        Europe_Chrome:
+          Location: Europe
+          Browser: Chrome
+    steps:
+      - script: echo $(Location) # echos A or B depending on which leg is running
