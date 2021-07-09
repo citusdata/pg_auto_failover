@@ -1203,11 +1203,6 @@ pg_basebackup(const char *pgdata,
 	path_in_same_directory(pg_ctl, "pg_basebackup", pg_basebackup);
 
 	setenv("PGCONNECT_TIMEOUT", POSTGRES_CONNECT_TIMEOUT, 1);
-
-	if (!IS_EMPTY_STRING_BUFFER(replicationSource->password))
-	{
-		setenv("PGPASSWORD", replicationSource->password, 1);
-	}
 	setenv("PGAPPNAME", replicationSource->applicationName, 1);
 
 	if (!prepare_primary_conninfo(primaryConnInfo,
@@ -1216,7 +1211,7 @@ pg_basebackup(const char *pgdata,
 								  primaryNode->port,
 								  replicationSource->userName,
 								  NULL, /* no database */
-								  NULL, /* no password here */
+								  replicationSource->password,
 								  replicationSource->applicationName,
 								  replicationSource->sslOptions,
 								  false)) /* do not escape this one */
@@ -1332,18 +1327,13 @@ pg_rewind(const char *pgdata,
 
 	setenv("PGCONNECT_TIMEOUT", POSTGRES_CONNECT_TIMEOUT, 1);
 
-	if (!IS_EMPTY_STRING_BUFFER(replicationSource->password))
-	{
-		setenv("PGPASSWORD", replicationSource->password, 1);
-	}
-
 	if (!prepare_primary_conninfo(primaryConnInfo,
 								  MAXCONNINFO,
 								  primaryNode->host,
 								  primaryNode->port,
 								  replicationSource->userName,
 								  "postgres", /* pg_rewind needs a database */
-								  NULL,       /* no password here */
+								  replicationSource->password,
 								  replicationSource->applicationName,
 								  replicationSource->sslOptions,
 								  false)) /* do not escape this one */
