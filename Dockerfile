@@ -101,4 +101,4 @@ USER docker
 ENV PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/postgresql/${PGVERSION}/bin
 ENV PG_AUTOCTL_DEBUG 1
 
-CMD pg_autoctl do tmux session --nodes 3
+CMD pg_autoctl do tmux session --nodes 3 --binpath /usr/local/bin/pg_autoctl
